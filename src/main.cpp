@@ -7,6 +7,7 @@
 #include <ArduinoOTA.h>
 #include <Ticker.h>
 #include <AsyncMqttClient.h>
+#include ".secrets"
 
 Ticker ticker;
 
@@ -46,7 +47,7 @@ void setup() {
   // ArduinoOTA.setHostname("myesp8266");
 
   // No authentication by default
-  ArduinoOTA.setPassword((const char *)"812234");
+  ArduinoOTA.setPassword((const char *)OTA_PASS);
   
   //set led pin as output
   pinMode(LED_BUILTIN, OUTPUT);
