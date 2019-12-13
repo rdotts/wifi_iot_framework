@@ -9,12 +9,14 @@
 #include <ArduinoOTA.h>
 #include <Ticker.h>
 #include <AsyncMqttClient.h>
+#include "mqtt_handler.h"
 #include ".secrets"
 
 #define LED LED_BUILTIN
 
 Ticker ticker;
 WiFiManager wm;
+
 // Default MQTT server can be overwritten in config mode
 char mqtt_server[40] = "192.168.1.1";
 char mqtt_port[6] = "1883";
@@ -159,6 +161,18 @@ void setupOTA()
   ArduinoOTA.begin();
 }
 
+void setupMQTT(){
+  mqttClient.onConnect(onMqttConnect);
+  mqttClient.onDisconnect(onMqttDisconnect);
+  mqttClient.onSubscribe(onMqttSubscribe);
+  mqttClient.onUnsubscribe(onMqttUnsubscribe);
+  mqttClient.onMessage(onMqttMessage);
+  mqttClient.onPublish(onMqttPublish);
+  mqttClient.setServer(mqtt_server, atoi(mqtt_port));
+  
+  mqttClient.connect();
+}
+
 void setup()
 {
   wm.setConnectTimeout(30);      // how long to try to connect for before continuing
@@ -219,6 +233,8 @@ void setup()
     digitalWrite(LED, LOW); //keep LED on; esp8266 is reverse polarity for builtin led
 
     setupOTA();
+
+    setupMQTT();
 
     Serial.println("All setup complete");
   }
