@@ -1,7 +1,9 @@
+#include <FS.h>
 #include <ESP8266WiFi.h>
 #include <DNSServer.h>
 #include <ESP8266WebServer.h>
 #include <WiFiManager.h>
+#include <ArduinoJson.h>
 #include <ESP8266mDNS.h>
 #include <WiFiUdp.h>
 #include <ArduinoOTA.h>
@@ -9,84 +11,130 @@
 #include <AsyncMqttClient.h>
 #include ".secrets"
 
-Ticker ticker;
+#define LED LED_BUILTIN
 
+Ticker ticker;
+WiFiManager wm; // global wm instance
+char mqtt_server[40];
+char mqtt_port[6];
 bool shouldSaveConfig = false;
 
 void tick()
 {
-  //toggle state
-  int state = digitalRead(LED_BUILTIN);  // get the current state of GPIO1 pin
-  digitalWrite(LED_BUILTIN, !state);     // set pin to the opposite state
+  digitalWrite(LED, !digitalRead(LED)); // set pin to the opposite state
 }
 
 //gets called when WiFiManager enters configuration mode
-void configModeCallback (WiFiManager *myWiFiManager) {
+void configModeCallback(WiFiManager *myWiFiManager)
+{
   Serial.println("Entered config mode");
   Serial.println(WiFi.softAPIP());
   //if you used auto generated SSID, print it
   Serial.println(myWiFiManager->getConfigPortalSSID());
-  //entered config mode, make led toggle faster
+  // blink quickly while in config mode
+  ticker.detach();
   ticker.attach(0.2, tick);
 }
 
-//callback notifying us of the need to save config
-void saveConfigCallback () {
-  Serial.println("Should save config");
+void preSaveConfigCallback()
+{
+  Serial.println("Config needs to be saved");
   shouldSaveConfig = true;
 }
 
-void setup() {
-  //flag for saving data
-
-  Serial.begin(115200);
-  // Port defaults to 8266
-  // ArduinoOTA.setPort(8266);
-
-  // Hostname defaults to esp8266-[ChipID]
-  // ArduinoOTA.setHostname("myesp8266");
-
-  // No authentication by default
-  ArduinoOTA.setPassword((const char *)OTA_PASS);
-  
-  //set led pin as output
-  pinMode(LED_BUILTIN, OUTPUT);
-  // start ticker with 0.5 because we start in AP mode and try to connect
-  ticker.attach(0.6, tick);
-
-  //WiFiManager
-  //Local intialization. Once its business is done, there is no need to keep it around
-  WiFiManager wifiManager;
-  wifiManager.setConfigPortalTimeout(180);
-  
-  //reset settings - for testing
-  //wifiManager.resetSettings();
-
-  //set callback that gets called when connecting to previous WiFi fails, and enters Access Point mode
-  wifiManager.setAPCallback(configModeCallback);
-
-  //fetches ssid and pass and tries to connect
-  //if it does not connect it starts an access point with the specified name
-  //here  "AutoConnectAP"
-  //and goes into a blocking loop awaiting configuration
-  if (!wifiManager.autoConnect()) {
-    Serial.println("failed to connect and hit timeout");
-    //reset and try again, or maybe put it to deep sleep
-    ESP.reset();
-    delay(1000);
+String getParam(String name)
+{
+  //read parameter from server
+  String value;
+  if (wm.server->hasArg(name))
+  {
+    value = wm.server->arg(name);
   }
+  return value;
+}
 
-  //if you get here you have connected to the WiFi
-  wifiManager.setSaveConfigCallback(saveConfigCallback);
-  Serial.println("connected");
-  ticker.detach();
-  
+void setupSpiffs()
+{
+  Serial.println("mounting FS...");
+  if (SPIFFS.begin())
+  {
+    Serial.println("mounted file system");
+    if (SPIFFS.exists("/config.json"))
+    {
+      //file exists, reading and loading
+      Serial.println("reading config file");
+      File configFile = SPIFFS.open("/config.json", "r");
+      if (configFile)
+      {
+        Serial.println("opened config file");
+        size_t size = configFile.size();
+        // Allocate a buffer to store contents of the file.
+        std::unique_ptr<char[]> buf(new char[size]);
+
+        configFile.readBytes(buf.get(), size);
+        DynamicJsonDocument jsonBuffer(1024);
+        DeserializationError error = deserializeJson(jsonBuffer, buf.get());
+        if (error)
+        {
+          Serial.println("Error parsing stored config");
+          return;
+        }
+        serializeJson(jsonBuffer, Serial);
+
+        strcpy(mqtt_server, jsonBuffer["mqtt_server"]);
+        strcpy(mqtt_port, jsonBuffer["mqtt_port"]);
+      }
+    }
+  }
+  else
+    Serial.println("failed to mount FS");
+}
+
+void saveSpiffs()
+{
+  Serial.println("saving config");
+  DynamicJsonDocument jsonBuffer(1024);
+  jsonBuffer["mqtt_server"] = mqtt_server;
+  jsonBuffer["mqtt_port"] = mqtt_port;
+
+  File configFile = SPIFFS.open("/config.json", "w");
+  if (!configFile)
+  {
+    Serial.println("failed to open config file for writing");
+  }
+  serializeJsonPretty(jsonBuffer, Serial);
+  serializeJson(jsonBuffer, configFile);
+
+  configFile.close();
+  shouldSaveConfig = false;
+}
+
+void printWiFiConfig()
+{
+  Serial.print("local ip: ");
+  Serial.print(WiFi.localIP());
+  Serial.print("\tsubnet mask: ");
+  Serial.print(WiFi.subnetMask());
+  Serial.println("gateway ip: ");
+  Serial.print(WiFi.gatewayIP());
+  Serial.print("\tMQTT broker: ");
+  Serial.print(mqtt_server);
+  Serial.print(":");
+  Serial.println(mqtt_port);
+}
+
+void setupOTA()
+{
+  // ArduinoOTA.setPort(8266);
+  // ArduinoOTA.setHostname("myesp8266"); //defaults to esp8266-[ChipID]
+  ArduinoOTA.setPassword((const char *)OTA_PASS); //defaults to none
+
   ArduinoOTA.onStart([]() {
-    Serial.println("Start");
+    Serial.println("Starting OTA update");
   });
 
   ArduinoOTA.onEnd([]() {
-    Serial.println("\nEnd");
+    Serial.println("\nDone");
   });
 
   ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
@@ -95,21 +143,86 @@ void setup() {
 
   ArduinoOTA.onError([](ota_error_t error) {
     Serial.printf("Error[%u]: ", error);
-    if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
-    else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
-    else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
-    else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
-    else if (error == OTA_END_ERROR) Serial.println("End Failed");
+    if (error == OTA_AUTH_ERROR)
+      Serial.println("Auth Failed");
+    else if (error == OTA_BEGIN_ERROR)
+      Serial.println("Begin Failed");
+    else if (error == OTA_CONNECT_ERROR)
+      Serial.println("Connect Failed");
+    else if (error == OTA_RECEIVE_ERROR)
+      Serial.println("Receive Failed");
+    else if (error == OTA_END_ERROR)
+      Serial.println("End Failed");
   });
-
   ArduinoOTA.begin();
-  Serial.println("Ready");
-  Serial.print("IP address: ");
-  Serial.println(WiFi.localIP());
-  //keep LED on
-  digitalWrite(LED_BUILTIN, LOW);
 }
 
-void loop() {
-    ArduinoOTA.handle();
+void setup()
+{
+  wm.setConnectTimeout(30);      // how long to try to connect for before continuing
+  wm.setConfigPortalTimeout(90); // auto close configportal after n seconds
+  wm.setSaveConnectTimeout(30);  // how long to try a newly saved config
+  wm.setAPClientCheck(true);     // avoid timeout if client connected to softap
+  wm.setAPCallback(configModeCallback);
+  wm.setPreSaveConfigCallback(preSaveConfigCallback);
+  WiFiManagerParameter custom_mqtt_server("server", "mqtt server", mqtt_server, 40);
+  WiFiManagerParameter custom_mqtt_port("port", "mqtt port", mqtt_port, 6);
+  wm.addParameter(&custom_mqtt_server);
+  wm.addParameter(&custom_mqtt_port);
+
+  WiFi.mode(WIFI_STA); // explicitly set mode, esp defaults to STA+AP
+  
+  // wipe settings (for testing)    //
+  //================================//
+  // wm.resetSettings();            //
+  // SPIFFS.format();               //
+  //================================//
+
+  Serial.begin(115200);
+  pinMode(LED, OUTPUT);
+  delay(3000);
+  Serial.println("\n Searching for connection");
+  ticker.attach(1, tick); // blink slowly while trying to connect
+
+  setupSpiffs();
+
+  if (!wm.autoConnect())
+  { // auto generated AP name from chipid)
+    // Reboot to alternate between trying known connection and allowing config via AP until one of them works
+    Serial.println("Failed to connect");
+    ESP.restart();
+    delay(5000);
+  }
+  else
+  {
+    //if you get here you have connected to the WiFi
+    Serial.println("Connected to WiFi");
+    // Steady LED shows active connection
+    ticker.detach();
+    digitalWrite(LED, LOW);
+
+    //read updated parameters
+    strcpy(mqtt_server, custom_mqtt_server.getValue());
+    strcpy(mqtt_port, custom_mqtt_port.getValue());
+
+    //save the custom parameters to FS
+    if (shouldSaveConfig)
+    {
+      saveSpiffs();
+    }
+
+    Serial.println("Connection successful");
+    printWiFiConfig();
+    ticker.detach();
+    digitalWrite(LED, LOW); //keep LED on; esp8266 is reverse polarity for builtin led
+
+    setupOTA();
+
+    Serial.println("All setup complete");
+  }
+}
+
+void loop()
+{
+  ArduinoOTA.handle();
 }
