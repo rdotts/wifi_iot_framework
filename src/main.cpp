@@ -11,7 +11,7 @@
 #include ".secrets"
 
 #define LED D4
-#define RELAYPIN D4
+#define RELAYPIN D5
 #define RELAYNAME "Christmas Lights"
 
 Ticker ticker;
@@ -88,8 +88,10 @@ void setupFauxmo()
   
   fauxmo.onSetState([](unsigned char device_id, const char * device_name, bool state, unsigned char value) {
     Serial.printf("[MAIN] Device #%d (%s) state: %s value: %d\n", device_id, device_name, state ? "ON" : "OFF", value);
+    // Note HIGH and LOW are reversec; this is a quirk of the JCC-3FF low level trigger relay being used with 3.3V
+    // instead of 5v
     if (strcmp(device_name, RELAYNAME) == 0)
-      digitalWrite(RELAYPIN, state ? HIGH : LOW);
+      digitalWrite(RELAYPIN, state ? LOW : HIGH);
   });
 }
 
