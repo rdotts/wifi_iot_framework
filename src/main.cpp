@@ -14,9 +14,10 @@
 #define LED LED_BUILTIN
 
 Ticker ticker;
-WiFiManager wm; // global wm instance
-char mqtt_server[40];
-char mqtt_port[6];
+WiFiManager wm;
+// Default MQTT server can be overwritten in config mode
+char mqtt_server[40] = "192.168.1.1";
+char mqtt_port[6] = "1883";
 bool shouldSaveConfig = false;
 
 void tick()
@@ -111,16 +112,17 @@ void saveSpiffs()
 
 void printWiFiConfig()
 {
-  Serial.print("local ip: ");
+  Serial.print("\nlocal ip: ");
   Serial.print(WiFi.localIP());
   Serial.print("\tsubnet mask: ");
-  Serial.print(WiFi.subnetMask());
-  Serial.println("gateway ip: ");
+  Serial.println(WiFi.subnetMask());
+  Serial.print("gateway ip: ");
   Serial.print(WiFi.gatewayIP());
   Serial.print("\tMQTT broker: ");
   Serial.print(mqtt_server);
   Serial.print(":");
   Serial.println(mqtt_port);
+  Serial.println("");
 }
 
 void setupOTA()
@@ -171,7 +173,7 @@ void setup()
   wm.addParameter(&custom_mqtt_port);
 
   WiFi.mode(WIFI_STA); // explicitly set mode, esp defaults to STA+AP
-  
+
   // wipe settings (for testing)    //
   //================================//
   // wm.resetSettings();            //
