@@ -3,22 +3,20 @@
 #include <DNSServer.h>
 #include <ESP8266WebServer.h>
 #include <WiFiManager.h>
-#include <ArduinoJson.h>
 #include <ESP8266mDNS.h>
 #include <WiFiUdp.h>
 #include <ArduinoOTA.h>
 #include <Ticker.h>
-#include <AsyncMqttClient.h>
+#include <fauxmoESP.h>
 #include ".secrets"
 
-#define LED LED_BUILTIN
+#define LED D4
+#define RELAYPIN D4
+#define RELAYNAME "Christmas Lights"
 
 Ticker ticker;
 WiFiManager wm;
-// Default MQTT server can be overwritten in config mode
-char mqtt_server[40] = "192.168.1.1";
-char mqtt_port[6] = "1883";
-bool shouldSaveConfig = false;
+fauxmoESP fauxmo;
 
 void tick()
 {
@@ -37,92 +35,14 @@ void configModeCallback(WiFiManager *myWiFiManager)
   ticker.attach(0.2, tick);
 }
 
-void preSaveConfigCallback()
-{
-  Serial.println("Config needs to be saved");
-  shouldSaveConfig = true;
-}
-
-String getParam(String name)
-{
-  //read parameter from server
-  String value;
-  if (wm.server->hasArg(name))
-  {
-    value = wm.server->arg(name);
-  }
-  return value;
-}
-
-void setupSpiffs()
-{
-  Serial.println("mounting FS...");
-  if (SPIFFS.begin())
-  {
-    Serial.println("mounted file system");
-    if (SPIFFS.exists("/config.json"))
-    {
-      //file exists, reading and loading
-      Serial.println("reading config file");
-      File configFile = SPIFFS.open("/config.json", "r");
-      if (configFile)
-      {
-        Serial.println("opened config file");
-        size_t size = configFile.size();
-        // Allocate a buffer to store contents of the file.
-        std::unique_ptr<char[]> buf(new char[size]);
-
-        configFile.readBytes(buf.get(), size);
-        DynamicJsonDocument jsonBuffer(1024);
-        DeserializationError error = deserializeJson(jsonBuffer, buf.get());
-        if (error)
-        {
-          Serial.println("Error parsing stored config");
-          return;
-        }
-        serializeJson(jsonBuffer, Serial);
-
-        strcpy(mqtt_server, jsonBuffer["mqtt_server"]);
-        strcpy(mqtt_port, jsonBuffer["mqtt_port"]);
-      }
-    }
-  }
-  else
-    Serial.println("failed to mount FS");
-}
-
-void saveSpiffs()
-{
-  Serial.println("saving config");
-  DynamicJsonDocument jsonBuffer(1024);
-  jsonBuffer["mqtt_server"] = mqtt_server;
-  jsonBuffer["mqtt_port"] = mqtt_port;
-
-  File configFile = SPIFFS.open("/config.json", "w");
-  if (!configFile)
-  {
-    Serial.println("failed to open config file for writing");
-  }
-  serializeJsonPretty(jsonBuffer, Serial);
-  serializeJson(jsonBuffer, configFile);
-
-  configFile.close();
-  shouldSaveConfig = false;
-}
-
 void printWiFiConfig()
 {
   Serial.print("\nlocal ip: ");
   Serial.print(WiFi.localIP());
   Serial.print("\tsubnet mask: ");
-  Serial.println(WiFi.subnetMask());
-  Serial.print("gateway ip: ");
-  Serial.print(WiFi.gatewayIP());
-  Serial.print("\tMQTT broker: ");
-  Serial.print(mqtt_server);
-  Serial.print(":");
-  Serial.println(mqtt_port);
-  Serial.println("");
+  Serial.print(WiFi.subnetMask());
+  Serial.print("\tgateway ip: ");
+  Serial.println(WiFi.gatewayIP());
 }
 
 void setupOTA()
@@ -159,72 +79,76 @@ void setupOTA()
   ArduinoOTA.begin();
 }
 
+void setupFauxmo()
+{
+  fauxmo.createServer(true); // not needed, this is the default value
+  fauxmo.setPort(80);        // This is required for gen3 devices
+  fauxmo.enable(true);
+  fauxmo.addDevice(RELAYNAME);
+  
+  fauxmo.onSetState([](unsigned char device_id, const char * device_name, bool state, unsigned char value) {
+    Serial.printf("[MAIN] Device #%d (%s) state: %s value: %d\n", device_id, device_name, state ? "ON" : "OFF", value);
+    if (strcmp(device_name, RELAYNAME) == 0)
+      digitalWrite(RELAYPIN, state ? HIGH : LOW);
+  });
+}
+
 void setup()
 {
-  wm.setConnectTimeout(30);      // how long to try to connect for before continuing
-  wm.setConfigPortalTimeout(90); // auto close configportal after n seconds
-  wm.setSaveConnectTimeout(30);  // how long to try a newly saved config
-  wm.setAPClientCheck(true);     // avoid timeout if client connected to softap
-  wm.setAPCallback(configModeCallback);
-  wm.setPreSaveConfigCallback(preSaveConfigCallback);
-  WiFiManagerParameter custom_mqtt_server("server", "mqtt server", mqtt_server, 40);
-  WiFiManagerParameter custom_mqtt_port("port", "mqtt port", mqtt_port, 6);
-  wm.addParameter(&custom_mqtt_server);
-  wm.addParameter(&custom_mqtt_port);
+    wm.setConnectTimeout(30);      // how long to try to connect for before continuing
+    wm.setConfigPortalTimeout(90); // auto close configportal after n seconds
+    wm.setSaveConnectTimeout(30);  // how long to try a newly saved config
+    wm.setAPClientCheck(true);     // avoid timeout if client connected to softap
+    wm.setAPCallback(configModeCallback);
 
-  WiFi.mode(WIFI_STA); // explicitly set mode, esp defaults to STA+AP
+    WiFi.mode(WIFI_STA); // explicitly set mode, esp defaults to STA+AP
 
-  // wipe settings (for testing)    //
-  //================================//
-  // wm.resetSettings();            //
-  // SPIFFS.format();               //
-  //================================//
+    // wipe settings (for testing)    //
+    //================================//
+    // wm.resetSettings();            //
+    // SPIFFS.format();               //
+    //================================//
 
-  Serial.begin(115200);
-  pinMode(LED, OUTPUT);
-  delay(3000);
-  Serial.println("\n Searching for connection");
-  ticker.attach(1, tick); // blink slowly while trying to connect
+    Serial.begin(115200);
+    pinMode(LED, OUTPUT);
+    pinMode(RELAYPIN, OUTPUT);
+    delay(3000);
+    digitalWrite(RELAYPIN, LOW);
 
-  setupSpiffs();
+    Serial.println("\n Searching for connection");
+    ticker.attach(1, tick); // blink slowly while trying to connect
 
-  if (!wm.autoConnect())
-  { // auto generated AP name from chipid)
-    // Reboot to alternate between trying known connection and allowing config via AP until one of them works
-    Serial.println("Failed to connect");
-    ESP.restart();
-    delay(5000);
-  }
-  else
-  {
-    //if you get here you have connected to the WiFi
-    Serial.println("Connected to WiFi");
-    // Steady LED shows active connection
-    ticker.detach();
-    digitalWrite(LED, LOW);
-
-    //read updated parameters
-    strcpy(mqtt_server, custom_mqtt_server.getValue());
-    strcpy(mqtt_port, custom_mqtt_port.getValue());
-
-    //save the custom parameters to FS
-    if (shouldSaveConfig)
-    {
-      saveSpiffs();
+    if (!wm.autoConnect())
+    { // auto generated AP name from chipid)
+      // Reboot to alternate between trying known connection and allowing config via AP until one of them works
+      Serial.println("Failed to connect");
+      ESP.restart();
+      delay(5000);
     }
+    else
+    {
+      //if you get here you have connected to the WiFi
+      Serial.println("Connected to WiFi");
+      // Steady LED shows active connection
+      ticker.detach();
+      digitalWrite(LED, LOW);
 
-    Serial.println("Connection successful");
-    printWiFiConfig();
-    ticker.detach();
-    digitalWrite(LED, LOW); //keep LED on; esp8266 is reverse polarity for builtin led
+      Serial.println("Connection successful");
+      wm.stopConfigPortal(); //ensure port 80 is free for Alexa
+      printWiFiConfig();
+      ticker.detach();
+      digitalWrite(LED, LOW); //keep LED on; esp8266 is reverse polarity for builtin led
 
-    setupOTA();
+      setupOTA();
+      setupFauxmo();
 
-    Serial.println("All setup complete");
-  }
+      Serial.println("All setup complete");
+    }
 }
 
 void loop()
 {
-  ArduinoOTA.handle();
+    ArduinoOTA.handle();
+    fauxmo.handle();
+
 }
