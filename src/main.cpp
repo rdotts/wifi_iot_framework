@@ -115,7 +115,7 @@ void setup()
     pinMode(LED, OUTPUT);
     pinMode(RELAYPIN, OUTPUT);
     delay(3000);
-    digitalWrite(RELAYPIN, LOW);
+    digitalWrite(RELAYPIN, HIGH);
 
     Serial.println("\n Searching for connection");
     ticker.attach(1, tick); // blink slowly while trying to connect
